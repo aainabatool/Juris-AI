@@ -1,0 +1,110 @@
+# ========================================
+# 🐍 Python & Environment
+# ========================================
+_pycache_/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+develop-eggs/
+.installed.cfg
+*.manifest
+*.spec
+
+# ========================================
+# 🧪 Virtual Environments
+# ========================================
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ========================================
+# 📦 Dependency Files
+# ========================================
+Pipfile.lock
+poetry.lock
+
+# ========================================
+# 🧰 IDEs and Editors
+# ========================================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+.DS_Store
+Thumbs.db
+
+# ========================================
+# 📄 Logs & Outputs
+# ========================================
+*.log
+logs/
+debug.log
+*.out
+*.err
+
+# ========================================
+# 📂 Data & Cache
+# ========================================
+data/extracted/
+data/*.zip
+_cache_/
+.cache/
+.tmp/
+.temp/
+.ipynb_checkpoints/
+
+# ========================================
+# 🔐 Secrets & Config
+# ========================================
+.env
+.env.*
+config.json
+secrets.json
+token.json
+
+# ========================================
+# 🧠 Model / Embeddings / Outputs
+# ========================================
+*.pkl
+*.pt
+*.bin
+*.h5
+*.ckpt
+*.npy
+*.npz
+*.joblib
+
+# ========================================
+# 🧪 Jupyter / Notebooks
+# ========================================
+.ipynb_checkpoints/
+*.ipynb_save
+*.nbconvert/
+.nbconvert.
+*.jupyterlab-settings
+
+# ========================================
+# 🧠 Supabase / Keys / Credentials
+# ========================================
+supabase/.temp/
+supabase/.env.local
+supabase/functions/.env
+
+# ========================================
+# 🧹 Misc
+# ========================================
+*.bak
+*.tmp
+*.old
+*.swp
+
+backend/Data
