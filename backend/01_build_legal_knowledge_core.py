@@ -1,177 +1,115 @@
 import os
-import json
-import sqlite3
-from typing import List, Dict, Any, Optional
-
-import pandas as pd
+import fitz
+import nltk
+import numpy as np
+import chromadb
 from tqdm import tqdm
-from pydantic import BaseModel
-from unstructured.partition.auto import partition
-from unstructured.chunking import chunk_elements
-from unstructured.documents.elements import element_from_dict
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.embeddings import TextEmbedding
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import VectorParams, Distance, PointStruct
+# -----------------------------------------
+# 1️⃣ Setup
+# -----------------------------------------
+nltk.download('punkt', quiet=True)
+model = SentenceTransformer("all-MiniLM-L6-v2")  # free, small, fast
+chroma_client = chromadb.Client()
+collection = chroma_client.get_or_create_collection(name="legal_laws")
 
+# -----------------------------------------
+# 2️⃣ Extract Text from PDFs
+# -----------------------------------------
+def extract_text_from_pdfs(root_folder):
+    pdf_texts = []
+    for subdir, _, files in os.walk(root_folder):
+        for file in files:
+            if file.lower().endswith(".pdf"):
+                pdf_path = os.path.join(subdir, file)
+                try:
+                    with fitz.open(pdf_path) as doc:
+                        text = "\n".join(page.get_text() for page in doc)
+                        pdf_texts.append((file, text))
+                        print(f"✅ Extracted text from {file}")
+                except Exception as e:
+                    print(f"⚠️ Failed to extract {file}: {e}")
+    return pdf_texts
 
-# --------- CONFIG ---------
-PDF_ROOT = "Data/Legal Laws"
-ENRICHED_CHUNKS_PATH = "enriched_chunks.json"
-DB_PATH = "legal_facts.db"
-COLLECTION_NAME = "legal_docs_v1"
+# -----------------------------------------
+# 3️⃣ Semantic Chunking
+# -----------------------------------------
+def semantic_chunk_text(text, max_chunk_tokens=400, similarity_threshold=0.45):
+    from nltk.tokenize import sent_tokenize
 
-# --------- LLM METADATA MODEL ---------
-class ChunkMetadata(BaseModel):
-    summary: str
-    keywords: List[str]
-    hypothetical_questions: List[str]
-    table_summary: Optional[str] = None
-
-
-# --------- FUNCTIONS ---------
-def find_pdfs(root_path: str) -> List[str]:
-    pdfs = []
-    for root, _, files in os.walk(root_path):
-        for f in files:
-            if f.lower().endswith(".pdf"):
-                pdfs.append(os.path.join(root, f))
-    return pdfs
-
-
-def parse_pdf_file(file_path: str) -> List[Dict]:
-    try:
-        elements = partition(filename=file_path, strategy='fast')
-        return [el.to_dict() for el in elements]
-    except Exception as e:
-        print(f"Error parsing {file_path}: {e}")
+    sentences = sent_tokenize(text)
+    if not sentences:
         return []
 
+    embeddings = model.encode(sentences, convert_to_tensor=False)
+    chunks, current_chunk = [], [sentences[0]]
+    current_tokens = len(sentences[0].split())
 
-def generate_enrichment_prompt(chunk_text: str, is_table: bool) -> str:
-    table_instruction = (
-        "This chunk is a TABLE. Your summary should describe key insights and trends."
-        if is_table else ""
-    )
-    return f"""
-You are a legal expert. Analyze the following document chunk and generate structured metadata.
-{table_instruction}
-Chunk Content:
----
-{chunk_text}
----
-"""
+    for i in range(1, len(sentences)):
+        sim = cosine_similarity(
+            [embeddings[i - 1]], [embeddings[i]]
+        )[0][0]
 
+        token_count = len(sentences[i].split())
 
-def enrich_chunk(chunk, llm) -> Optional[Dict[str, Any]]:
-    is_table = 'text_as_html' in chunk.metadata.to_dict()
-    content = chunk.metadata.text_as_html if is_table else chunk.text
-    truncated_content = content[:3000]
+        # decide if new sentence should be added to current chunk
+        if sim >= similarity_threshold and (current_tokens + token_count) <= max_chunk_tokens:
+            current_chunk.append(sentences[i])
+            current_tokens += token_count
+        else:
+            chunks.append(" ".join(current_chunk))
+            current_chunk = [sentences[i]]
+            current_tokens = token_count
 
-    prompt = generate_enrichment_prompt(truncated_content, is_table)
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
 
-    try:
-        metadata_obj = llm.invoke(prompt)
-        return metadata_obj.dict()
-    except Exception as e:
-        print(f"  - Error enriching chunk: {e}")
-        return None
+    return chunks
 
+# -----------------------------------------
+# 4️⃣ Process All PDFs → Chunk → Store in Chroma
+# -----------------------------------------
+def build_knowledge_core(root_dir):
+    pdf_texts = extract_text_from_pdfs(root_dir)
 
-def create_embedding_text(chunk: Dict) -> str:
-    return f"Summary: {chunk['summary']}\nKeywords: {', '.join(chunk['keywords'])}\nContent: {chunk['content'][:1000]}"
+    for file_name, text in tqdm(pdf_texts, desc="Processing PDFs"):
+        chunks = semantic_chunk_text(text)
 
+        # Create embeddings for each chunk
+        embeddings = model.encode(chunks).tolist()
 
-# --------- MAIN PIPELINE ---------
-if __name__ == "__main__":
-    print("Finding PDFs...")
-    all_pdfs = find_pdfs(PDF_ROOT)
-    print(f"Found {len(all_pdfs)} PDFs")
-
-    # Load checkpoint if exists
-    if os.path.exists(ENRICHED_CHUNKS_PATH):
-        print("Loading existing enriched chunks...")
-        with open(ENRICHED_CHUNKS_PATH, 'r') as f:
-            all_enriched_chunks = json.load(f)
-    else:
-        all_enriched_chunks = []
-
-        # Initialize LLM for metadata enrichment
-        enrichment_llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            temperature=0
-        ).with_structured_output(ChunkMetadata)
-
-        for pdf_file in tqdm(all_pdfs, desc="Processing PDFs"):
-            parsed_elements = parse_pdf_file(pdf_file)
-            if not parsed_elements:
-                continue
-
-            elements_for_chunking = [element_from_dict(el) for el in parsed_elements]
-
-            chunks = chunk_elements(
-                elements_for_chunking,
-                strategy="by_title",
-                max_characters=2048,
-                combine_text_under_n_chars=256,
-                new_after_n_chars=1800
+        # Store chunks in Chroma
+        for idx, chunk in enumerate(chunks):
+            collection.add(
+                documents=[chunk],
+                metadatas=[{
+                    "source_file": file_name,
+                    "chunk_number": idx + 1
+                }],
+                ids=[f"{file_name}_{idx}"]
             )
 
-            for chunk in tqdm(chunks, desc="Enriching Chunks", leave=False):
-                enriched_data = enrich_chunk(chunk, enrichment_llm)
-                if enriched_data:
-                    is_table = 'text_as_html' in chunk.metadata.to_dict()
-                    content = chunk.metadata.text_as_html if is_table else chunk.text
-                    final_chunk = {
-                        'source': pdf_file,
-                        'content': content,
-                        'is_table': is_table,
-                        **enriched_data
-                    }
-                    all_enriched_chunks.append(final_chunk)
+    print(f"✅ Stored all chunks in ChromaDB ({collection.count()} total).")
 
-        # Save checkpoint
-        with open(ENRICHED_CHUNKS_PATH, 'w') as f:
-            json.dump(all_enriched_chunks, f)
+# -----------------------------------------
+# 5️⃣ Simple Query Example
+# -----------------------------------------
+def query_knowledge(query_text, n_results=3):
+    results = collection.query(query_texts=[query_text], n_results=n_results)
+    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
+        print(f"\n📄 From: {meta['source_file']} | Chunk #{meta['chunk_number']}")
+        print(doc[:300], "...\n")
 
-    print(f"Total enriched chunks: {len(all_enriched_chunks)}")
+# -----------------------------------------
+# 🚀 Main
+# -----------------------------------------
+if __name__ == "__main__":
+    ROOT_DIR = "Data/Legal Laws"  # change if needed
 
-    # --------- VECTOR STORE ---------
-    print("Initializing Qdrant...")
-    embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-    client = QdrantClient(":memory:")
+    print("🔍 Building Legal Knowledge Core...")
+    build_knowledge_core(ROOT_DIR)
 
-    client.recreate_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(
-            size=embedding_model.get_embedding_dimension(),
-            distance=Distance.COSINE
-        )
-    )
-
-    points_to_upsert = []
-    texts_to_embed = []
-
-    for i, chunk in enumerate(all_enriched_chunks):
-        texts_to_embed.append(create_embedding_text(chunk))
-        points_to_upsert.append(PointStruct(id=i, payload=chunk))
-
-    print("Generating embeddings...")
-    embeddings = list(embedding_model.embed(texts_to_embed, batch_size=32))
-
-    for i, emb in enumerate(embeddings):
-        points_to_upsert[i].vector = emb.tolist()
-
-    client.upsert(collection_name=COLLECTION_NAME, points=points_to_upsert)
-    print(f"Points in collection: {client.get_collection(collection_name=COLLECTION_NAME).points_count}")
-
-    # --------- OPTIONAL RELATIONAL DB (example CSV) ---------
-    # csv_path = "legal_summary.csv"
-    # if os.path.exists(csv_path):
-    #     print("Loading structured data into SQLite...")
-    #     df = pd.read_csv(csv_path)
-    #     conn = sqlite3.connect(DB_PATH)
-    #     df.to_sql("legal_summary", conn, if_exists="replace", index=False)
-    #     conn.close()
-    #     print("Relational DB ready")
+    print("\n💬 Example Query:")
+    query_knowledge("What is the punishment for theft?")
