@@ -5,22 +5,15 @@ google-generativeai
 setuptools 
 
 # pip install "unstructured==0.10.30" "pdfminer.six==20221105"
-sec-edgar-downloader
-unstructured[pdf,html]
 langchain
 langgraph
-langchain-openai
-langchain-google-genai
-qdrant-client
-fastembed
-sentence-transformers
-langsmith
-ragas
-tavily-python
+langchain-core
+langchain-community
+chromadb
+langchain_chroma 
+pydantic
+ipykernel
 python-dotenv
-pandas
-tqdm
-langchain-huggingface
-dotenv
-PyMuPDF
-PyPDF2
+langchain-google-genai
+langchain-groq
+numpy<2.0.0
